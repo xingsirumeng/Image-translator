@@ -1,0 +1,3 @@
+# 核心依赖
+requests>=2.31.0  # 用于API调用
+python-dotenv>=1.0.0  # 用于.env文件加载
