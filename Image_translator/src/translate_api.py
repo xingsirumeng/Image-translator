@@ -1,16 +1,17 @@
 import os
 import sys
-from pathlib import Path
-import requests
+import time
 import base64
 import json
-import time
-from dotenv import load_dotenv, dotenv_values
+import requests
+from pathlib import Path
+from dotenv import dotenv_values
+from PIL import Image, ImageDraw, ImageFont  # 用于图片文字替换
+
 
 
 def get_project_root():
     """获取项目根目录"""
-    # 尝试从当前文件路径推导
     current_file = Path(__file__).resolve()
 
     # 如果当前文件在src目录中，则根目录是父目录
@@ -51,12 +52,13 @@ def load_config():
 
         # 保存到文件
         with open(ENV_FILE, "w", encoding="utf-8") as f:
+            f.write(f"# API密钥配置 请勿分享此文件!\n")
             f.write(f"BAIDU_API_KEY={baidu_api_key}\n")
             f.write(f"BAIDU_SECRET_KEY={baidu_secret_key}\n")
             f.write(f"DEEPSEEK_API_KEY={deepseek_api_key}\n")
 
         print(f"\n配置已保存到 {ENV_FILE}")
-        # print("请确保将此文件添加到.gitignore避免泄露")
+        print("请确保将此文件添加到.gitignore避免泄露")
 
         return {
             "BAIDU_API_KEY": baidu_api_key,
@@ -65,36 +67,32 @@ def load_config():
         }
 
 
-# ... 其他函数保持不变 ...
-
-
 def get_baidu_ocr_token(api_key, secret_key):
     """获取百度OCR的访问令牌"""
-    url = (f"https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id={api_key}&client_secret="
-           f"{secret_key}")
+    url = f"https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id={api_key}&client_secret={secret_key}"
     response = requests.post(url)
     return response.json().get("access_token")
 
 
-def baidu_ocr(image_path, access_token):
-    """使用百度OCR识别图片中的文字"""
+def baidu_ocr_with_location(image_path, access_token):
+    """获取带位置信息的OCR结果"""
     try:
-        with open(image_path, "rb") as image_file:
-            base64_data = base64.b64encode(image_file.read()).decode()
+        with open(image_path, "rb") as f:
+            img_base64 = base64.b64encode(f.read()).decode()
 
-        url = f"https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic?access_token={access_token}"
+        # 使用高精度接口获取位置信息
+        url = f"https://aip.baidubce.com/rest/2.0/ocr/v1/accurate?access_token={access_token}"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        data = {"image": base64_data}
+        data = {"image": img_base64, "recognize_granularity": "big"}
 
         response = requests.post(url, headers=headers, data=data)
         result = response.json()
 
-        if "words_result" in result:
-            text_list = [res["words"] for res in result["words_result"]]
-            return "\n".join(text_list)
-        else:
+        if "words_result" not in result:
             error_msg = result.get("error_msg", "未知错误")
             raise Exception(f"OCR识别失败: {error_msg} (错误码: {result.get('error_code', '未知')}")
+
+        return result["words_result"]
     except FileNotFoundError:
         raise Exception(f"图片文件不存在: {image_path}")
     except Exception as e:
@@ -115,8 +113,6 @@ def deepseek_translate(text, api_key, target_lang="中文"):
             f"文本内容：\n\n{text}\n\n"
             "要求："
             "\n1. 只返回翻译结果，不要添加额外说明"
-            # "\n2. 自动识别源语言"
-            # "\n3. 保持原始文本格式（换行、段落等）"
         )
 
         payload = {
@@ -126,7 +122,7 @@ def deepseek_translate(text, api_key, target_lang="中文"):
             "max_tokens": 4000
         }
 
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
         result = response.json()
 
         if "choices" in result:
@@ -141,7 +137,72 @@ def deepseek_translate(text, api_key, target_lang="中文"):
         raise Exception(f"翻译处理错误: {str(e)}")
 
 
+def replace_text_in_image(original_path, output_path, ocr_results, translations):
+    """在图片上替换文字"""
+    try:
+        # 打开原始图片
+        img = Image.open(original_path)
+        draw = ImageDraw.Draw(img)
+
+        # 尝试加载中文字体，如果失败则使用默认字体
+        try:
+            # 尝试常见中文字体路径
+            font_paths = [
+                "C:/Windows/Fonts/simhei.ttf",  # Windows
+                "/System/Library/Fonts/PingFang.ttc",  # macOS
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"  # Linux
+            ]
+
+            font = None
+            for path in font_paths:
+                if Path(path).exists():
+                    font = ImageFont.truetype(path, 20)  # 初始大小，后续会调整
+                    break
+
+            if font is None:
+                font = ImageFont.load_default()
+        except:
+            font = ImageFont.load_default()
+
+        for i, result in enumerate(ocr_results):
+            text = translations[i]
+            location = result["location"]
+
+            # 计算合适的字体大小（基于原始文字区域高度）
+            font_size = max(10, int(location["height"] * 0.7))
+
+            # 更新字体大小
+            if hasattr(font, "path"):  # 如果是truetype字体
+                try:
+                    font = ImageFont.truetype(font.path, font_size)
+                except:
+                    pass
+
+            # 用白色矩形覆盖原文字
+            draw.rectangle(
+                [(location["left"], location["top"]),
+                 (location["left"] + location["width"],
+                  location["top"] + location["height"])],
+                fill="white"
+            )
+
+            # 绘制新文字（居中）
+            text_width = font.getlength(text) if hasattr(font, "getlength") else len(text) * font_size // 2
+            x = location["left"] + (location["width"] - text_width) // 2
+            y = location["top"] + (location["height"] - font_size) // 2
+
+            draw.text((x, y), text, fill="black", font=font)
+
+        # 保存结果
+        img.save(output_path)
+        return True
+    except Exception as e:
+        print(f"图片处理错误: {str(e)}")
+        return False
+
+
 def main():
+
     try:
         # 安全警告
         print("安全提示: API密钥将保存到本地 .env 文件")
@@ -163,31 +224,57 @@ def main():
         )
 
         print("正在进行文字识别...")
-        ocr_text = baidu_ocr(image_path, baidu_token)
-        print(f"\n识别结果:\n{ocr_text}")
+        ocr_results = baidu_ocr_with_location(image_path, baidu_token)
+        original_texts = [item["words"] for item in ocr_results]
+        print(f"\n识别到 {len(original_texts)} 个文字区域")
 
+        # 翻译所有文本
         print("\n正在翻译文本...")
         start_time = time.time()
-        translation = deepseek_translate(
-            ocr_text,
-            config["DEEPSEEK_API_KEY"],
-            target_lang
-        )
+        translations = []
+
+        # 批量翻译文本（减少API调用次数）
+        combined_text = "\n".join(original_texts)
+        combined_translation = deepseek_translate(combined_text, config["DEEPSEEK_API_KEY"], target_lang)
+        translations = combined_translation.split("\n")
+
+        # 确保翻译结果数量与原始文本匹配
+        if len(translations) != len(original_texts):
+            print("翻译结果数量与原始文本不匹配，尝试逐行翻译...")
+            translations = []
+            for text in original_texts:
+                translations.append(deepseek_translate(text, config["DEEPSEEK_API_KEY"], target_lang))
+                time.sleep(0.5)  # 避免API调用过于频繁
+
         elapsed = time.time() - start_time
+        print(f"\n翻译完成 ({elapsed:.2f}秒)")
 
-        print(f"\n翻译完成 ({elapsed:.2f}秒):\n{translation}")
+        # 显示部分翻译结果
+        print("\n部分翻译结果预览:")
+        for i in range(min(3, len(original_texts))):
+            print(f"  {original_texts[i]} → {translations[i]}")
+        if len(original_texts) > 3:
+            print(f"  ...共 {len(original_texts)} 条翻译")
 
-        # 询问是否保存翻译结果
-        save_option = input("\n是否保存翻译结果到文件? (y/n): ").lower()
-        if save_option == "y":
-            output_path = input("输出文件名(默认: translation.txt): ") or "translation.txt"
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(f"原始文本:\n{ocr_text}\n\n")
-                f.write(f"翻译结果({target_lang}):\n{translation}")
-            print(f"结果已保存到 {output_path}")
+        # 图片文字替换
+        print("\n正在替换图片文字...")
+        output_path = Path(image_path).stem + "_translated.jpg"
+        success = replace_text_in_image(image_path, output_path, ocr_results, translations)
+
+        if success:
+            print(f"\n图片处理完成，结果已保存到: {output_path}")
+        else:
+            print("\n图片处理失败，仅保存文本翻译结果")
+
+        # 保存文本结果
+        text_output_path = Path(image_path).stem + "_translation.txt"
+        with open(text_output_path, "w", encoding="utf-8") as f:
+            f.write(f"原始文本:\n{combined_text}\n\n")
+            f.write(f"翻译结果({target_lang}):\n{combined_translation}")
+        print(f"文本翻译结果已保存到: {text_output_path}")
 
     except Exception as e:
-        print(f"\n 错误: {str(e)}")
+        print(f"\n错误: {str(e)}")
         print("请检查: 1) API密钥是否正确 2) 网络连接 3) 图片路径")
 
 
