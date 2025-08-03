@@ -1,0 +1,55 @@
+# Python 虚拟环境
+.venv/
+venv/
+env/
+env.bak/
+venv.bak/
+
+# Python 缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.python-version
+
+# 环境变量文件
+.env
+*.env
+**/.env*
+
+# PyCharm 和 IDE 文件
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.project
+.pydevproject
+.settings/
+
+# Jupyter 笔记本检查点
+.ipynb_checkpoints/
+
+# 构建输出
+build/
+dist/
+*.egg-info/
+*.egg
+*.whl
+
+# 测试和覆盖率
+.coverage
+htmlcov/
+.pytest_cache/
+test_results.xml
+
+# 日志文件
+*.log
+logs/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 文档生成
+docs/_build/
