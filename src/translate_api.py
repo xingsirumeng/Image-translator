@@ -6,8 +6,7 @@ import json
 import requests
 from pathlib import Path
 from dotenv import dotenv_values
-from PIL import Image, ImageDraw, ImageFont  # 用于图片文字替换
-
+import text_process
 
 
 def get_project_root():
@@ -83,8 +82,14 @@ def baidu_ocr_with_location(image_path, access_token):
         # 使用高精度接口获取位置信息
         url = f"https://aip.baidubce.com/rest/2.0/ocr/v1/accurate?access_token={access_token}"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        data = {"image": img_base64, "recognize_granularity": "big"}
-
+        # 优化参数：启用段落检测和方向检测
+        data = {
+            "image": img_base64,
+            "recognize_granularity": "big",  # 返回行级别信息
+            # "paragraph": "true",  # 尝试检测段落
+            # "detect_direction": "true",  # 检测文本方向
+            # "vertexes_location": "true"  # 获取更精确的顶点位置
+        }
         response = requests.post(url, headers=headers, data=data)
         result = response.json()
 
@@ -109,10 +114,11 @@ def deepseek_translate(text, api_key, target_lang="中文"):
         }
 
         prompt = (
-            f"请将以下内容准确翻译成{target_lang}，保持原始格式不变。"
+            f"请将以下内容准确翻译成{target_lang}，严格保持原始格式：\n\n"
             f"文本内容：\n\n{text}\n\n"
-            "要求："
-            "\n1. 只返回翻译结果，不要添加额外说明"
+            "翻译要求：\n"
+            "1. 仅返回翻译结果，不要添加任何额外说明（包括引导句）\n"
+            "2. 保留所有换行符、空格和标点\n"
         )
 
         payload = {
@@ -135,70 +141,6 @@ def deepseek_translate(text, api_key, target_lang="中文"):
         raise Exception("翻译请求超时，请重试")
     except Exception as e:
         raise Exception(f"翻译处理错误: {str(e)}")
-
-
-def replace_text_in_image(original_path, output_path, ocr_results, translations):
-    """在图片上替换文字"""
-    try:
-        # 打开原始图片
-        img = Image.open(original_path)
-        draw = ImageDraw.Draw(img)
-
-        # 尝试加载中文字体，如果失败则使用默认字体
-        try:
-            # 尝试常见中文字体路径
-            font_paths = [
-                "C:/Windows/Fonts/simhei.ttf",  # Windows
-                "/System/Library/Fonts/PingFang.ttc",  # macOS
-                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"  # Linux
-            ]
-
-            font = None
-            for path in font_paths:
-                if Path(path).exists():
-                    font = ImageFont.truetype(path, 20)  # 初始大小，后续会调整
-                    break
-
-            if font is None:
-                font = ImageFont.load_default()
-        except:
-            font = ImageFont.load_default()
-
-        for i, result in enumerate(ocr_results):
-            text = translations[i]
-            location = result["location"]
-
-            # 计算合适的字体大小（基于原始文字区域高度）
-            font_size = max(10, int(location["height"] * 0.7))
-
-            # 更新字体大小
-            if hasattr(font, "path"):  # 如果是truetype字体
-                try:
-                    font = ImageFont.truetype(font.path, font_size)
-                except:
-                    pass
-
-            # 用白色矩形覆盖原文字
-            draw.rectangle(
-                [(location["left"], location["top"]),
-                 (location["left"] + location["width"],
-                  location["top"] + location["height"])],
-                fill="white"
-            )
-
-            # 绘制新文字（居中）
-            text_width = font.getlength(text) if hasattr(font, "getlength") else len(text) * font_size // 2
-            x = location["left"] + (location["width"] - text_width) // 2
-            y = location["top"] + (location["height"] - font_size) // 2
-
-            draw.text((x, y), text, fill="black", font=font)
-
-        # 保存结果
-        img.save(output_path)
-        return True
-    except Exception as e:
-        print(f"图片处理错误: {str(e)}")
-        return False
 
 
 def main():
@@ -228,38 +170,38 @@ def main():
         original_texts = [item["words"] for item in ocr_results]
         print(f"\n识别到 {len(original_texts)} 个文字区域")
 
+        # 合并文本行为有意义的段落
+        original_paragraphs = text_process.merge_text_lines(ocr_results)
+        print(f"识别到 {len(original_paragraphs)} 个有意义的文本段落")
+
         # 翻译所有文本
         print("\n正在翻译文本...")
         start_time = time.time()
         translations = []
-
-        # 批量翻译文本（减少API调用次数）
-        combined_text = "\n".join(original_texts)
-        combined_translation = deepseek_translate(combined_text, config["DEEPSEEK_API_KEY"], target_lang)
-        translations = combined_translation.split("\n")
-
-        # 确保翻译结果数量与原始文本匹配
-        if len(translations) != len(original_texts):
-            print("翻译结果数量与原始文本不匹配，尝试逐行翻译...")
-            translations = []
-            for text in original_texts:
-                translations.append(deepseek_translate(text, config["DEEPSEEK_API_KEY"], target_lang))
-                time.sleep(0.5)  # 避免API调用过于频繁
+        for paragraph in original_paragraphs:
+            # 翻译整个段落（保持上下文）
+            trans_paragraph = deepseek_translate(
+                paragraph['words'],
+                config["DEEPSEEK_API_KEY"],
+                target_lang
+            )
+            translations.append(trans_paragraph)
+            time.sleep(0.3)  # 避免API速率限制
 
         elapsed = time.time() - start_time
         print(f"\n翻译完成 ({elapsed:.2f}秒)")
 
         # 显示部分翻译结果
         print("\n部分翻译结果预览:")
-        for i in range(min(3, len(original_texts))):
-            print(f"  {original_texts[i]} → {translations[i]}")
-        if len(original_texts) > 3:
-            print(f"  ...共 {len(original_texts)} 条翻译")
+        for i in range(min(3, len(original_paragraphs))):
+            print(f"  {original_paragraphs[i]['words']} → {translations[i]}")
+        if len(original_paragraphs) > 3:
+            print(f"  ...共 {len(original_paragraphs)} 条翻译")
 
         # 图片文字替换
         print("\n正在替换图片文字...")
         output_path = Path(image_path).stem + "_translated.jpg"
-        success = replace_text_in_image(image_path, output_path, ocr_results, translations)
+        success = text_process.replace_text_in_image(image_path, output_path, original_paragraphs, translations)
 
         if success:
             print(f"\n图片处理完成，结果已保存到: {output_path}")
@@ -269,8 +211,10 @@ def main():
         # 保存文本结果
         text_output_path = Path(image_path).stem + "_translation.txt"
         with open(text_output_path, "w", encoding="utf-8") as f:
-            f.write(f"原始文本:\n{combined_text}\n\n")
-            f.write(f"翻译结果({target_lang}):\n{combined_translation}")
+            f.write("原始文本:\n")
+            f.write("\n".join([para['words'] for para in original_paragraphs]))
+            f.write("\n\n翻译结果:\n")
+            f.write("\n".join(translations))
         print(f"文本翻译结果已保存到: {text_output_path}")
 
     except Exception as e:
